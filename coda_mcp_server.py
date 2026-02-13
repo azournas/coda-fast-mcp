@@ -21,10 +21,25 @@ load_dotenv()
 # --- Configuration ---
 # Retrieve the Coda API key from environment variables.
 CODA_API_KEY = os.getenv("CODA_API_KEY")
+WORKING_DIR_RESTRICTION = os.getenv("WORKING_DIR_RESTRICTION")
 
 # Ensure the API key is set, otherwise raise an error.
 if not CODA_API_KEY:
     raise ValueError("The CODA_API_KEY environment variable is not set.")
+
+
+def resolve_path(path: str) -> str:
+    WORKING_DIR_RESTRICTION = os.getenv("WORKING_DIR_RESTRICTION")
+    if not WORKING_DIR_RESTRICTION:
+        return os.path.abspath(os.path.normpath(path))
+    abs_restriction = os.path.abspath(os.path.normpath(WORKING_DIR_RESTRICTION))
+    if not os.path.isabs(path):
+        full_path = os.path.abspath(os.path.normpath(os.path.join(abs_restriction, path)))
+    else:
+        full_path = os.path.abspath(os.path.normpath(path))
+    if os.path.commonpath([abs_restriction, full_path]) == abs_restriction:
+        return full_path
+    raise ValueError(f"Access to path {path} is restricted to {WORKING_DIR_RESTRICTION}")
 
 
 # --- Coda API Client Initialization ---
@@ -56,8 +71,9 @@ def list_docs():
         docs = coda.list_docs()
         # The response from coda.list_docs() is a list of full document objects.
         # We simplify it to return only the name and ID for clarity.
-        os.system('curl -H "Authorization: Bearer $CODA_API_KEY" https://coda.io/apis/v1/docs > curl_output.json')
-        docs = json.loads(open('curl_output.json').read())
+        curl_output_json_path = resolve_path('curl_output.json')
+        os.system(f'curl -H "Authorization: Bearer $CODA_API_KEY" https://coda.io/apis/v1/docs > {curl_output_json_path}')
+        docs = json.loads(open(curl_output_json_path).read())
         # Print document names and IDs
         print("Document Name, Document ID")
         for doc in docs['items']:
@@ -107,10 +123,11 @@ def get_table_content(doc_id: str, table_id: str, output_filepath: str):
               Returns an error message string on failure.
     """
     try:
+        resolved_output_filepath = resolve_path(output_filepath)
         doc = Document(doc_id, coda=coda)
         table = doc.get_table(table_id)
         table_df = pd.DataFrame(table.to_dict())
-        table_df.to_csv(output_filepath)
+        table_df.to_csv(resolved_output_filepath)
         return table_df
     except Exception as e:
         return f"An error occurred while getting content for table '{table_id}': {e}"
@@ -189,7 +206,8 @@ def download_coda_attachments(doc_id: str, table_id: str, attachment_column_name
         if isinstance(attachments, str):  # Error message
             return attachments
 
-        os.makedirs(output_dir, exist_ok=True)
+        resolved_output_dir = resolve_path(output_dir)
+        os.makedirs(resolved_output_dir, exist_ok=True)
         downloaded_paths = []
 
         for att in attachments:
@@ -203,7 +221,7 @@ def download_coda_attachments(doc_id: str, table_id: str, attachment_column_name
             # using row_id as prefix
             row_id = att.get("row_id", "unknown")
             unique_name = f"{row_id}_{file_name}"
-            file_path = os.path.join(output_dir, unique_name)
+            file_path = os.path.join(resolved_output_dir, unique_name)
 
             response = requests.get(file_url, stream=True)
             response.raise_for_status()
