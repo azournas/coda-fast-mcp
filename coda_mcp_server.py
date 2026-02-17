@@ -29,16 +29,22 @@ if not CODA_API_KEY:
 
 
 def resolve_path(path: str) -> str:
-    WORKING_DIR_RESTRICTION = os.getenv("WORKING_DIR_RESTRICTION")
     if not WORKING_DIR_RESTRICTION:
         return os.path.abspath(os.path.normpath(path))
+
+    # Ensure restriction itself is absolute and normalized
     abs_restriction = os.path.abspath(os.path.normpath(WORKING_DIR_RESTRICTION))
+
+    # Ensure we are working with absolute normalized paths
     if not os.path.isabs(path):
         full_path = os.path.abspath(os.path.normpath(os.path.join(abs_restriction, path)))
     else:
         full_path = os.path.abspath(os.path.normpath(path))
+
+    # Check if the resolved path is within the restriction
     if os.path.commonpath([abs_restriction, full_path]) == abs_restriction:
         return full_path
+
     raise ValueError(f"Access to path {path} is restricted to {WORKING_DIR_RESTRICTION}")
 
 
@@ -60,80 +66,84 @@ mcp = FastMCP(
 # --- MCP Tools ---
 
 @mcp.tool()
-def list_docs():
+async def list_docs():
     """
     Lists all available Coda documents that the API key has access to.
 
     Returns:
-        dict: a dictionary with the doc name and doc ID
+        dict: a dictionary with the doc names and doc IDs in an 'items' list.
     """
     try:
-        docs = coda.list_docs()
-        # The response from coda.list_docs() is a list of full document objects.
-        # We simplify it to return only the name and ID for clarity.
-        curl_output_json_path = resolve_path('curl_output.json')
-        os.system(f'curl -H "Authorization: Bearer $CODA_API_KEY" https://coda.io/apis/v1/docs > {curl_output_json_path}')
-        docs = json.loads(open(curl_output_json_path).read())
-        # Print document names and IDs
-        print("Document Name, Document ID")
-        for doc in docs['items']:
-            print(f"{doc['name']}, {doc['id']}")
-        return docs
+        docs = await asyncio.to_thread(coda.list_docs)
+        items = [{"name": doc["name"], "id": doc["id"]} for doc in docs.get("items", [])]
+        return {"items": items}
+        
     except Exception as e:
-        return f"An error occurred while listing documents: {e}"
+        raise RuntimeError(f"An error occurred while listing documents: {e}")
 
 
 @mcp.tool()
-def list_tables(doc_id: str):
+async def list_tables(doc_id: str):
     """
-    Lists all tables within a specific Coda document. 
+    Lists all tables within a specific Coda document.
 
     Args:
         doc_id (str): The ID of the Coda document to inspect.
 
     Returns:
-        list: A list of dictionaries, where each dictionary represents a table
-              and contains the table's 'name' and 'id'.
-              Returns an error message string on failure.
+        dict: A dictionary mapping table names to their IDs.
     """
     try:
         # Initialize the Document object
-        document = Document(doc_id, coda=coda)
-        doc_dict = {}
-        for i in document.list_tables():
-            if "data" in i.name.lower():
-                print(f"{i.name}: [{i.id}]")
-                doc_dict[i.name] = i.id
-        
+        document = await asyncio.to_thread(Document, doc_id, coda=coda)
+        tables = await asyncio.to_thread(document.list_tables)
+        doc_dict = {table.name: table.id for table in tables}
+
         return doc_dict
     except Exception as e:
-        return f"An error occurred while listing tables for doc '{doc_id}': {e}"
+        raise RuntimeError(f"An error occurred while listing tables for doc '{doc_id}': {e}")
     
 @mcp.tool()
-def get_table_content(doc_id: str, table_id: str, output_filepath: str):
+async def get_table_content(doc_id: str, table_id: str, output_filepath: str):
     """
-    Retrieves all rows and their content from a specific table in a Coda document. Saves the table to a .csv file
+    Retrieves all rows and their content from a specific table in a Coda document.
+    Saves the table to a .csv file and returns column metadata.
 
     Args:
         doc_id (str): The ID of the Coda document.
         table_id (str): The ID of the table to retrieve content from.
-        output_filepath (str): The filepath where the table contents will be saved
+        output_filepath (str): The filepath where the table contents will be saved.
     Returns:
-        DataFrame: A pandas dataframe that contains the table contents
-              Returns an error message string on failure.
+        dict: A dictionary containing 'num_columns' and either 'columns' (list) or 'summary' (string).
     """
     try:
         resolved_output_filepath = resolve_path(output_filepath)
-        doc = Document(doc_id, coda=coda)
-        table = doc.get_table(table_id)
-        table_df = pd.DataFrame(table.to_dict())
-        table_df.to_csv(resolved_output_filepath)
-        return table_df
+        doc = await asyncio.to_thread(Document, doc_id, coda=coda)
+        table = await asyncio.to_thread(doc.get_table, table_id)
+
+        data = await asyncio.to_thread(table.to_dict)
+        table_df = pd.DataFrame(data)
+
+        await asyncio.to_thread(table_df.to_csv, resolved_output_filepath, index=False)
+
+        cols = list(table_df.columns)
+        num_cols = len(cols)
+
+        result = {"num_columns": num_cols}
+
+        if num_cols < 30:
+            result["columns"] = cols
+        else:
+            first_15 = cols[:15]
+            last_15 = cols[-15:]
+            result["summary"] = f"number of columns = {num_cols}, first 15 columns = {first_15}; last 15 columns = {last_15}"
+
+        return result
     except Exception as e:
-        return f"An error occurred while getting content for table '{table_id}': {e}"
+        raise RuntimeError(f"An error occurred while getting content for table '{table_id}': {e}")
 
 @mcp.tool()
-def get_table_attachments(doc_id: str, table_id: str, attachment_column_name: str):
+async def get_table_attachments(doc_id: str, table_id: str, attachment_column_name: str):
     """
     Get file attachment information (URLs and metadata) from a Coda table column.
 
@@ -153,7 +163,7 @@ def get_table_attachments(doc_id: str, table_id: str, attachment_column_name: st
             "useColumnNames": True
         }
 
-        response = requests.get(url, headers=headers, params=params)
+        response = await asyncio.to_thread(requests.get, url, headers=headers, params=params)
         response.raise_for_status()
 
         data = response.json()
@@ -185,10 +195,10 @@ def get_table_attachments(doc_id: str, table_id: str, attachment_column_name: st
 
         return attachments
     except Exception as e:
-        return f"An error occurred while getting attachments: {e}"
+        raise RuntimeError(f"An error occurred while getting attachments: {e}")
 
 @mcp.tool()
-def download_coda_attachments(doc_id: str, table_id: str, attachment_column_name: str, output_dir: str):
+async def download_coda_attachments(doc_id: str, table_id: str, attachment_column_name: str, output_dir: str):
     """
     Download all files from a Coda table attachment column to a local directory.
 
@@ -202,9 +212,7 @@ def download_coda_attachments(doc_id: str, table_id: str, attachment_column_name
         List of downloaded file paths
     """
     try:
-        attachments = get_table_attachments(doc_id, table_id, attachment_column_name)
-        if isinstance(attachments, str):  # Error message
-            return attachments
+        attachments = await get_table_attachments(doc_id, table_id, attachment_column_name)
 
         resolved_output_dir = resolve_path(output_dir)
         os.makedirs(resolved_output_dir, exist_ok=True)
@@ -223,18 +231,21 @@ def download_coda_attachments(doc_id: str, table_id: str, attachment_column_name
             unique_name = f"{row_id}_{file_name}"
             file_path = os.path.join(resolved_output_dir, unique_name)
 
-            response = requests.get(file_url, stream=True)
+            response = await asyncio.to_thread(requests.get, file_url, stream=True)
             response.raise_for_status()
 
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            def save_attachment():
+                with open(file_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+            await asyncio.to_thread(save_attachment)
 
             downloaded_paths.append(file_path)
 
         return downloaded_paths
     except Exception as e:
-        return f"An error occurred while downloading attachments: {e}"
+        raise RuntimeError(f"An error occurred while downloading attachments: {e}")
 
 
 
