@@ -249,6 +249,62 @@ async def download_coda_attachments(doc_id: str, table_id: str, attachment_colum
 
 
 
+import shutil
+import zipfile
+
+@mcp.tool()
+async def unzip_and_inspect_data(zip_filepath: str, output_dir: str):
+    """
+    Unzips a file and inspects any CSV files found within it, returning column metadata.
+
+    Args:
+        zip_filepath (str): The path to the zip file to unzip.
+        output_dir (str): The directory where the files will be extracted.
+    Returns:
+        dict: A dictionary mapping filenames to their column metadata/summaries.
+    """
+    try:
+        resolved_zip_path = resolve_path(zip_filepath)
+        resolved_output_dir = resolve_path(output_dir)
+
+        os.makedirs(resolved_output_dir, exist_ok=True)
+
+        def extract_zip():
+            with zipfile.ZipFile(resolved_zip_path, 'r') as zip_ref:
+                zip_ref.extractall(resolved_output_dir)
+
+        await asyncio.to_thread(extract_zip)
+
+        results = {}
+
+        for root, _, files in os.walk(resolved_output_dir):
+            for file in files:
+                if file.endswith('.csv'):
+                    file_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(file_path, resolved_output_dir)
+
+                    try:
+                        df = await asyncio.to_thread(pd.read_csv, file_path)
+                        cols = list(df.columns)
+                        num_cols = len(cols)
+
+                        file_info = {"num_columns": num_cols}
+
+                        if num_cols < 30:
+                            file_info["columns"] = cols
+                        else:
+                            first_15 = cols[:15]
+                            last_15 = cols[-15:]
+                            file_info["summary"] = f"number of columns = {num_cols}, first 15 columns = {first_15}; last 15 columns = {last_15}"
+
+                        results[rel_path] = file_info
+                    except Exception as csv_err:
+                        results[rel_path] = {"error": str(csv_err)}
+
+        return results
+    except Exception as e:
+        raise RuntimeError(f"An error occurred while unzipping and inspecting data: {e}")
+
 # --- Server Execution ---
 # This block ensures the server only runs when the script is executed directly.
 if __name__ == "__main__":
